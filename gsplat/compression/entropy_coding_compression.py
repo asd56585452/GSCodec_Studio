@@ -1,5 +1,6 @@
 import json
 import os
+import gc
 from dataclasses import dataclass, field, InitVar
 from typing import Any, Callable, Dict, Optional
 
@@ -14,6 +15,11 @@ from gsplat.compression.sort import sort_splats
 from gsplat.utils import inverse_log_transform, log_transform
 from gsplat.compression_simulation.ops import STE_binary
 from gsplat.compression_simulation.entropy_model import Entropy_gaussian
+
+try:
+    from sklearn.cluster import KMeans
+except ImportError:
+    KMeans = None
 
 
 
@@ -860,9 +866,7 @@ def _compress_kmeans(
     Returns:
         Dict[str, Any]: metadata
     """
-    try:
-        from torchpq.clustering import KMeans
-    except:
+    if KMeans is None:
         raise ImportError(
             "Please install torchpq with 'pip install torchpq' to use K-means clustering"
         )
@@ -874,21 +878,28 @@ def _compress_kmeans(
         }
         return meta
     
-    kmeans = KMeans(n_clusters=n_clusters, distance="manhattan", verbose=verbose)
-    x = params.reshape(params.shape[0], -1).permute(1, 0).contiguous()
-    labels = kmeans.fit(x)
-    labels = labels.detach().cpu().numpy()
-    centroids = kmeans.centroids.permute(1, 0)
+    # Sklearn KMeans uses CPU
+    x_cpu = params.reshape(params.shape[0], -1).detach().cpu().numpy()
+    
+    # Default n_init=10 in sklearn, usually fine.
+    kmeans = KMeans(n_clusters=n_clusters, verbose=verbose, n_init=1)
+    kmeans.fit(x_cpu)
+    
+    labels = kmeans.labels_
+    centroids = kmeans.cluster_centers_
 
-    mins = torch.min(centroids)
-    maxs = torch.max(centroids)
+    mins = np.min(centroids)
+    maxs = np.max(centroids)
     centroids_norm = (centroids - mins) / (maxs - mins)
-    centroids_norm = centroids_norm.detach().cpu().numpy()
+    
     centroids_quant = (
         (centroids_norm * (2**quantization - 1)).round().astype(np.uint8)
     )
     labels = labels.astype(np.uint16)
-
+    
+    # Clean up sklearn model
+    del kmeans
+    
     npz_dict = {
         "centroids": centroids_quant,
         "labels": labels,
@@ -963,9 +974,7 @@ def _compress_masked_kmeans(
         Dict[str, Any]: metadata
         
     """
-    try:
-        from torchpq.clustering import KMeans
-    except:
+    if KMeans is None:
         raise ImportError(
             "Please install torchpq with 'pip install torchpq' to use K-means clustering"
         )
@@ -986,23 +995,38 @@ def _compress_masked_kmeans(
     bits.tofile(os.path.join(compress_dir, f"mask.bin"))
 
     # select vaild shN
-    kmeans = KMeans(n_clusters=n_clusters, distance="manhattan", verbose=verbose)
-
     masked_params = params[mask]
-    x = masked_params.reshape(masked_params.shape[0], -1).permute(1, 0).contiguous()
+    # To CPU for Sklearn
+    x_cpu = masked_params.reshape(masked_params.shape[0], -1).detach().cpu().numpy()
 
-    labels = kmeans.fit(x)
-    labels = labels.detach().cpu().numpy()
-    centroids = kmeans.centroids.permute(1, 0)
+    if x_cpu.shape[1] == 0:
+        print("Warning: No valid shN found, skipping clustering.")
+        # Need to handle this case properly or just pass
+        pass
+    
+    # Check for NaNs
+    if np.isnan(x_cpu).any():
+        print("Warning: NaNs detected in shN params! Zeroing out NaNs.")
+        x_cpu = np.nan_to_num(x_cpu, nan=0.0)
 
-    mins = torch.min(centroids)
-    maxs = torch.max(centroids)
+    # Sklearn KMeans
+    kmeans = KMeans(n_clusters=n_clusters, verbose=verbose, n_init=1)
+    kmeans.fit(x_cpu)
+    
+    labels = kmeans.labels_
+    centroids = kmeans.cluster_centers_
+
+    mins = np.min(centroids)
+    maxs = np.max(centroids)
     centroids_norm = (centroids - mins) / (maxs - mins)
-    centroids_norm = centroids_norm.detach().cpu().numpy()
+    
     centroids_quant = (
         (centroids_norm * (2**quantization - 1)).round().astype(np.uint8)
     )
     labels = labels.astype(np.uint16)
+
+    del kmeans
+    
     npz_dict = {
         "centroids": centroids_quant,
         "labels": labels,

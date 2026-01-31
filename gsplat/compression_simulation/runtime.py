@@ -95,6 +95,7 @@ class DefaultCompressionSimulation(CompressionSimulationBase):
         self._mask = AdaptiveMaskFactory.create(config.mask, device)
         self._quantizers: Dict[str, Any] = {}
         for name, attr_cfg in config.quantizer.attributes.items():
+            print("build_quantizer:",name,attr_cfg)
             quantizer = build_quantizer(name, attr_cfg)
             if quantizer is not None:
                 self._quantizers[name] = quantizer
