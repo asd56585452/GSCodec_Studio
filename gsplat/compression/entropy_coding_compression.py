@@ -129,10 +129,10 @@ class EntropyCodingCompression:
 
         # Param-specific preprocessing
         splats["means"] = log_transform(splats["means"])
-        splats["quats"] = F.normalize(splats["quats"], dim=-1)
+        # splats["quats"] = F.normalize(splats["quats"], dim=-1) # [Modified] Disable normalization as requested (d_rotation additivity)
 
         # Oulier filtering
-        outlier_filtering = True
+        outlier_filtering = False
         if outlier_filtering:
             # import pdb; pdb.set_trace()
             vaild_mask, splats = filter_splats(splats)
