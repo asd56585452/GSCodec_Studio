@@ -123,10 +123,10 @@ class EntropyCodingCompression:
 
         # Param-specific preprocessing
         splats["means"] = log_transform(splats["means"])
-        splats["quats"] = F.normalize(splats["quats"], dim=-1)
+        # splats["quats"] = F.normalize(splats["quats"], dim=-1)
 
         # Oulier filtering
-        outlier_filtering = True
+        outlier_filtering = False
         if outlier_filtering:
             # import pdb; pdb.set_trace()
             vaild_mask, splats = filter_splats(splats)
@@ -941,7 +941,7 @@ def _compress_masked_kmeans(
     compress_dir: str,
     param_name: str,
     params: Tensor,
-    n_clusters: int = 4096, # 65536
+    n_clusters: int = 4096*4, # 65536
     quantization: int = 8,
     verbose: bool = True,
     **kwargs,
