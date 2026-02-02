@@ -835,6 +835,100 @@ def _decompress_npz(compress_dir: str, param_name: str, meta: Dict[str, Any]) ->
     return params
 
 
+def run_kmeans(
+    x: torch.Tensor, 
+    n_clusters: int, 
+    max_iter: int = 100, 
+    tolerance: float = 1e-4, 
+    batch_size: int = 4096, 
+    verbose: bool = False,
+    seed: int = None
+):
+    """
+    Custom K-Means implementation using PyTorch with batching to avoid OOM.
+    Args:
+        x: Input tensor of shape (N, D)
+        n_clusters: Number of clusters (K)
+        max_iter: Maximum iterations
+        tolerance: Convergence tolerance
+        batch_size: Batch size for distance computation
+        verbose: Print progress
+        seed: Random seed for initialization
+    Returns:
+        labels: Tensor of shape (N,)
+        centroids: Tensor of shape (K, D)
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+        
+    N, D = x.shape
+    
+    # 1. Initialization (Random)
+    # Use random indices to select centroids
+    indices = torch.randperm(N, device=x.device)[:n_clusters]
+    centroids = x[indices]
+    
+    prev_centroids = centroids.clone()
+    
+    for i in range(max_iter):
+        # Reset accumulations
+        # shape: (n_clusters, D)
+        new_centroids_sum = torch.zeros((n_clusters, D), device=x.device, dtype=x.dtype)
+        # shape: (n_clusters,)
+        cluster_counts = torch.zeros(n_clusters, device=x.device, dtype=torch.long)
+        
+        # Batch processing for assignment
+        
+        for i_start in range(0, N, batch_size):
+            i_end = min(i_start + batch_size, N)
+            chunk = x[i_start:i_end] # (B, D)
+            
+            # Compute squared L2 distances: (B, K)
+            # |x-c|^2 = |x|^2 + |c|^2 - 2x.cT
+            # We can use torch.cdist which is optimized
+            dists = torch.cdist(chunk.float(), centroids.float())
+            
+            # Assign
+            _, labels_chunk = torch.min(dists, dim=1)
+            
+            # Accumulate
+            new_centroids_sum.index_add_(0, labels_chunk, chunk)
+            cluster_counts.index_add_(0, labels_chunk, torch.ones_like(labels_chunk).long())
+            
+        # Update centroids
+        mask = cluster_counts > 0
+        # Avoid division by zero, keep old centroids for empty clusters
+        centroids[mask] = new_centroids_sum[mask] / cluster_counts[mask].unsqueeze(1)
+        
+        # Check convergence
+        shift = torch.norm(centroids - prev_centroids, dim=1).mean()
+        if verbose and i % 10 == 0:
+            print(f"K-Means Iteration {i}: Shift {shift.item():.6f}")
+        
+        if shift < tolerance:
+            if verbose:
+                print(f"K-Means Converged at iteration {i}")
+            break
+            
+        prev_centroids = centroids.clone()
+        
+    # Final assignment
+    labels_all = []
+    # Optionally clear cache before final pass
+    torch.cuda.empty_cache()
+    
+    for i_start in range(0, N, batch_size):
+        i_end = min(i_start + batch_size, N)
+        chunk = x[i_start:i_end]
+        dists = torch.cdist(chunk.float(), centroids.float())
+        _, labels_chunk = torch.min(dists, dim=1)
+        labels_all.append(labels_chunk)
+        
+    labels = torch.cat(labels_all, dim=0)
+    
+    return labels, centroids
+
+
 def _compress_kmeans(
     compress_dir: str,
     param_name: str,
@@ -860,25 +954,22 @@ def _compress_kmeans(
     Returns:
         Dict[str, Any]: metadata
     """
-    try:
-        from torchpq.clustering import KMeans
-    except:
-        raise ImportError(
-            "Please install torchpq with 'pip install torchpq' to use K-means clustering"
-        )
-
-    if torch.numel == 0:
-        meta = {
-            "shape": list(params.shape),
-            "dtype": str(params.dtype).split(".")[1],
-        }
-        return meta
     
-    kmeans = KMeans(n_clusters=n_clusters, distance="manhattan", verbose=verbose)
-    x = params.reshape(params.shape[0], -1).permute(1, 0).contiguous()
-    labels = kmeans.fit(x)
-    labels = labels.detach().cpu().numpy()
-    centroids = kmeans.centroids.permute(1, 0)
+    # Use custom robust K-Means implementation
+    # Preprocess data: [N, D]
+    x = params.reshape(params.shape[0], -1).contiguous()
+    
+    # Run K-Means
+    labels, centroids = run_kmeans(
+        x, 
+        n_clusters=n_clusters, 
+        verbose=verbose, 
+        seed=0  # For reproducibility
+    )
+    
+    labels = labels.cpu().numpy()
+    # centroids is already [K, D] in our implementation
+
 
     mins = torch.min(centroids)
     maxs = torch.max(centroids)
@@ -941,7 +1032,7 @@ def _compress_masked_kmeans(
     compress_dir: str,
     param_name: str,
     params: Tensor,
-    n_clusters: int = 4096*4, # 65536
+    n_clusters: int = 4096, # 65536
     quantization: int = 8,
     verbose: bool = True,
     **kwargs,
@@ -963,13 +1054,6 @@ def _compress_masked_kmeans(
         Dict[str, Any]: metadata
         
     """
-    try:
-        from torchpq.clustering import KMeans
-    except:
-        raise ImportError(
-            "Please install torchpq with 'pip install torchpq' to use K-means clustering"
-        )
-
     if torch.numel == 0:
         meta = {
             "shape": list(params.shape),
@@ -986,14 +1070,22 @@ def _compress_masked_kmeans(
     bits.tofile(os.path.join(compress_dir, f"mask.bin"))
 
     # select vaild shN
-    kmeans = KMeans(n_clusters=n_clusters, distance="manhattan", verbose=verbose)
-
+    # Use custom robust K-Means implementation
+    # Preprocess data: [N, D]
     masked_params = params[mask]
-    x = masked_params.reshape(masked_params.shape[0], -1).permute(1, 0).contiguous()
+    x = masked_params.reshape(masked_params.shape[0], -1).contiguous()
+    
+    # Run K-Means
+    labels, centroids = run_kmeans(
+        x, 
+        n_clusters=n_clusters, 
+        verbose=verbose, 
+        seed=0  # For reproducibility
+    )
+    
+    labels = labels.cpu().numpy()
+    # centroids is already [K, D] in our implementation
 
-    labels = kmeans.fit(x)
-    labels = labels.detach().cpu().numpy()
-    centroids = kmeans.centroids.permute(1, 0)
 
     mins = torch.min(centroids)
     maxs = torch.max(centroids)
