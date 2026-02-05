@@ -118,8 +118,8 @@ class EntropyCodingCompression:
             compress_dir (str): directory to save compressed files
             splats (Dict[str, Tensor]): Gaussian splats to compress
         """
-        if entropy_models is None:
-            raise ValueError("EntropyCodingCompression should require entropy_models")
+        # if entropy_models is None:
+        #     raise ValueError("EntropyCodingCompression should require entropy_models")
 
         # Param-specific preprocessing
         splats["means"] = log_transform(splats["means"])
@@ -151,12 +151,13 @@ class EntropyCodingCompression:
             kwargs = {
                 "n_sidelen": n_sidelen,
                 "verbose": self.verbose,
+                "n_clusters": self.n_clusters,
             }
-            if param_name in entropy_models:
-                kwargs.update({"entropy_model": entropy_models[param_name]})
-                decoded_means = self.get_decompressed_means(compress_dir, meta["means"])
-                # kwargs.update({"decoded_means": inverse_log_transform(splats["means"])}) # means w/o quant
-                kwargs.update({"decoded_means": decoded_means})
+            # if param_name in entropy_models:
+            #     kwargs.update({"entropy_model": entropy_models[param_name]})
+            #     decoded_means = self.get_decompressed_means(compress_dir, meta["means"])
+            #     # kwargs.update({"decoded_means": inverse_log_transform(splats["means"])}) # means w/o quant
+            #     kwargs.update({"decoded_means": decoded_means})
 
             meta[param_name] = compress_fn(
                 compress_dir, param_name, splats[param_name], **kwargs
